@@ -248,7 +248,7 @@ module CNNWorker
 
     # ------ Main Functions ------
     function solve_ode(socket_conn, image::Matrix{Float64}, Ib::Float64, tempA::Matrix{Float64}, tempB::Matrix{Float64}, t_span::Vector{Float64}, initial_condition::Float64, wsocket)
-        SocketLogger.write_log_to_socket(socket_conn, "Starting ODE solver with $(nprocs()) processes and $(nworkers()) workers\n")
+        #SocketLogger.write_log_to_socket(socket_conn, "Starting ODE solver with $(nprocs()) processes and $(nworkers()) workers\n")
         WebSockets.write(wsocket, "Started ODE solver with DifferentialEquations.jl distributed computation...")
         
         n, m = size(image)
@@ -267,13 +267,13 @@ module CNNWorker
             end
         end
         
-        SocketLogger.write_log_to_socket(socket_conn, "Before Bu init")
+        #SocketLogger.write_log_to_socket(socket_conn, "Before Bu init")
         WebSockets.write(wsocket, "First convolution started with distributed computation")
         
         Bu = parallel_fftconvolve2d(Array(image_normalized), tempB)
         
         WebSockets.write(wsocket, "First convolution ended")
-        SocketLogger.write_log_to_socket(socket_conn, "After Bu init")
+        #SocketLogger.write_log_to_socket(socket_conn, "After Bu init")
         
         if n*m > 10000 && nworkers() > 1
             @sync @distributed for chunk in partition(1:n*m, nworkers())
@@ -290,7 +290,7 @@ module CNNWorker
         z0 = Array(image_normalized)
         params = (Ib, Bu, tempA, n, m, wsocket)
 
-        SocketLogger.write_log_to_socket(socket_conn, "Before ODE problem")
+        #SocketLogger.write_log_to_socket(socket_conn, "Before ODE problem")
         WebSockets.write(wsocket, "ODE Solver started with parallel settings!")
         
         prob = ODEProblem(f!, z0, (t_span[1], t_span[end]), params)
@@ -323,7 +323,7 @@ module CNNWorker
             )
         end
         
-        SocketLogger.write_log_to_socket(socket_conn, "After ODE problem")
+        #SocketLogger.write_log_to_socket(socket_conn, "After ODE problem")
         WebSockets.write(wsocket, "ODE solved successfully")
 
         process_and_generate_image(sol[end], n, m, wsocket)
