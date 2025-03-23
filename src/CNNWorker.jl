@@ -4,40 +4,31 @@ using FFTW, LoopVectorization, Sockets, Redis, DotEnv
 using SharedArrays, Distributed, DistributedArrays, LinearAlgebra
 using Images, FileIO, Base64, WebSockets, DifferentialEquations
 
-
 # Include dependencies
-include("SharedState.jl")
-using .SharedState
+# include("SharedState.jl")
+# using .SharedState
+# include("SharedLogic.jl")
+# using .SharedLogic
 
 include("SocketLogger.jl")
 include("ODESolver.jl")
 include("RedisQueueWatcher.jl")
 
-include("cnn_worker_function.jl")
+include("cnn_worker_functions.jl")
 
-# Global variable to track interrupt state
-const interrupt_flag = SharedState.InterruptFlag()
+# # Global variable to track interrupt state
+# const global_interrupt_flag = Ref(false)
 
 # Load environment variables
 function load_environment()
     env_path = joinpath(dirname(@__DIR__), ".env")
     DotEnv.load!(env_path)
     return (
-        host = get(ENV, "JULIA_PYTHON_HOST", "localhost"),
-        port = parse(Int, get(ENV, "JULIA_PYTHON_PORT3", "5555")),
-        redis_host = get(ENV, "REDIS_HOST", "localhost"),
-        redis_port = parse(Int, get(ENV, "REDIS_PORT", "6379"))
+        host = ENV["JULIA_PYTHON_HOST"],
+        port = parse(Int, ENV["JULIA_PYTHON_PORT3"]),
+        redis_host = ENV["REDIS_HOST"],
+        redis_port = parse(Int, ENV["REDIS_PORT"])
     )
-end
-
-function setup_distributed_environment(num_workers=Sys.CPU_THREADS - 1)
-    if nprocs() == 1
-        addprocs(num_workers)
-        @everywhere using SharedArrays, FFTW, LoopVectorization, DifferentialEquations
-        @everywhere using Images, FileIO, Base64, WebSockets, DistributedArrays, LinearAlgebra
-        @everywhere include("cnn_worker_functions.jl")
-    end
-    return (nprocs(), nworkers(), Threads.nthreads())
 end
 
 function handle_shutdown(redis_client, socket_conn)
@@ -51,29 +42,43 @@ end
 function start_worker(socket_conn, redis_host, redis_port)
     redis_client = nothing
     try
-        total_procs, worker_procs, threads_per_proc = setup_distributed_environment()
-        SocketLogger.write_log_to_socket(socket_conn, "Distributed environment: $total_procs processes, $worker_procs workers, $threads_per_proc threads\n")
-
         redis_client = Redis.connect(redis_host, redis_port)
-        RedisQueueWatcher.watch_redis_queue(redis_client, "queue:task_queue", socket_conn, interrupt_flag)
+        Base.sigatomic_begin()
+        RedisQueueWatcher.watch_redis_queue(redis_client, "queue:task_queue", socket_conn)
+        Base.sigatomic_end()
     catch e
+        if e isa InterruptException
+            SocketLogger.write_log_to_socket("Received interrupt signal!")
+        end
         SocketLogger.write_log_to_socket(socket_conn, "Error: $e\nBacktrace: $(catch_backtrace())\n")
         rethrow(e)
     finally
-        nworkers() > 0 && rmprocs(workers())
         handle_shutdown(redis_client, socket_conn)
     end
 end
 
+# In CNNWorker.jl
+
 function setup_signal_handlers()
-    return @async while !interrupt_flag.value
-        try
-            sleep(0.1)
-        catch e
-            if e isa InterruptException
-                interrupt_flag.value = true
-                println("\nReceived interrupt signal")
-                break
+    return @async begin
+        while !global_interrupt_flag[]
+            try
+                sleep(0.5)  # Check more frequently
+                
+                # Check if the interrupt flag file exists
+                if RedisQueueWatcher.is_interrupted()
+                    global_interrupt_flag[] = true
+                    println("\nInterrupt flag detected, shutting down...")
+                    break
+                end
+            catch e
+                if e isa InterruptException
+                    println("\nReceived interrupt signal in main process")
+                    global_interrupt_flag[] = true
+                    # Set the shared interrupt flag file
+                    RedisQueueWatcher.set_interrupt_flag(true)
+                    break
+                end
             end
         end
     end
@@ -84,7 +89,9 @@ function main()
     try
         signal_task = setup_signal_handlers()
         config = load_environment()
-        if (conn = SocketLogger.connect_to_python_socket_easy(config.host, config.port)) !== nothing
+        println(typeof(config.host))
+        println(typeof(config.port))
+        if (conn = SocketLogger.connect_to_python_socket(config.host, config.port)) !== nothing
             SocketLogger.write_log_to_socket(conn, "Julia Worker started!\n")
             start_worker(conn, config.redis_host, config.redis_port)
         else
@@ -92,10 +99,10 @@ function main()
         end
     catch e
         println("An error occurred: $e")
-        global_interrupt_flag[] = true
+        RedisQueueWatcher.set_interrupt_flag(true)
         rethrow(e)
     finally
-        global_interrupt_flag[] = true
+        RedisQueueWatcher.set_interrupt_flag(true)
         signal_task !== nothing && wait(signal_task)
         println("Julia Worker shutting down...\n")
     end
