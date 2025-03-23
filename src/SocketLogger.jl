@@ -1,5 +1,6 @@
 module SocketLogger
 using Sockets
+using ..CNNWorker
 
 export connect_to_python_socket, write_log_to_socket, connect_to_python_socket_easy
 
